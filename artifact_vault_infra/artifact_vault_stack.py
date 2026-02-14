@@ -55,6 +55,13 @@ class ArtifactVaultStack(cdk.Stack):
             encryption=s3.BucketEncryption.S3_MANAGED,
             versioned=True,
             removal_policy=cdk.RemovalPolicy.RETAIN,
+            cors=[
+                s3.CorsRule(
+                    allowed_methods=[s3.HttpMethods.GET, s3.HttpMethods.PUT, s3.HttpMethods.HEAD],
+                    allowed_origins=["*"],
+                    allowed_headers=["*"],
+                ),
+            ],
         )
 
         # Lambda: artifact CRUD (create, list, get, update, delete); placeholder owner until auth
@@ -132,25 +139,23 @@ class ArtifactVaultStack(cdk.Stack):
             authorizer_name="artifact-vault-cognito",
             identity_source="method.request.header.Authorization",
         )
-        method_options = apigw.MethodOptions(authorizer=cognito_authorizer)
-
         crud_integration = apigw.LambdaIntegration(
             self.artifact_crud_function,
             proxy=True,
         )
         artifacts = api.root.add_resource("artifacts")
-        artifacts.add_method("GET", crud_integration, method_options)
-        artifacts.add_method("POST", crud_integration, method_options)
+        artifacts.add_method("GET", crud_integration, authorizer=cognito_authorizer)
+        artifacts.add_method("POST", crud_integration, authorizer=cognito_authorizer)
         artifact_id = artifacts.add_resource("{id}")
-        artifact_id.add_method("GET", crud_integration, method_options)
-        artifact_id.add_method("PUT", crud_integration, method_options)
-        artifact_id.add_method("PATCH", crud_integration, method_options)
-        artifact_id.add_method("DELETE", crud_integration, method_options)
+        artifact_id.add_method("GET", crud_integration, authorizer=cognito_authorizer)
+        artifact_id.add_method("PUT", crud_integration, authorizer=cognito_authorizer)
+        artifact_id.add_method("PATCH", crud_integration, authorizer=cognito_authorizer)
+        artifact_id.add_method("DELETE", crud_integration, authorizer=cognito_authorizer)
         upload_urls = artifact_id.add_resource("upload-urls")
-        upload_urls.add_method("POST", crud_integration, method_options)
+        upload_urls.add_method("POST", crud_integration, authorizer=cognito_authorizer)
         files_resource = artifact_id.add_resource("files")
         file_filename = files_resource.add_resource("{filename}")
-        file_filename.add_method("GET", crud_integration, method_options)
+        file_filename.add_method("GET", crud_integration, authorizer=cognito_authorizer)
 
         # Stack outputs for front-end config
         cdk.CfnOutput(

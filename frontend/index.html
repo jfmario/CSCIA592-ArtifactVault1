@@ -4,7 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Artifact Vault</title>
-  <script src="https://cdn.jsdelivr.net/npm/aws-amplify@5/dist/aws-amplify.min.js"></script>
+  <!-- Cognito auth: amazon-cognito-identity-js (UMD bundle from unpkg) -->
+  <script src="https://unpkg.com/amazon-cognito-identity-js@3.2.2/dist/amazon-cognito-identity.min.js"></script>
   <style>
     :root { --bg: #0f1419; --surface: #1a2332; --border: #2d3a4f; --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --danger: #f85149; --success: #3fb950; }
     * { box-sizing: border-box; }
@@ -175,6 +176,7 @@
       }
 
       let currentArtifactId = null;
+      let authPool = null; // CognitoUserPool set in initAmplify
 
       function show(el) { el.classList.remove('hidden'); }
       function hide(el) { el.classList.add('hidden'); }
@@ -185,9 +187,17 @@
         p.classList.toggle('hidden', !msg);
       }
 
-      async function getToken() {
-        const session = await window.Amplify.Auth.currentSession();
-        return session.getIdToken().getJwtToken();
+      function getToken() {
+        return new Promise((resolve, reject) => {
+          if (!authPool) return reject(new Error('Not configured'));
+          const user = authPool.getCurrentUser();
+          if (!user) return reject(new Error('Not signed in'));
+          user.getSession((err, session) => {
+            if (err) return reject(err);
+            if (!session || !session.getIdToken()) return reject(new Error('No session'));
+            resolve(session.getIdToken().getJwtToken());
+          });
+        });
       }
 
       async function api(method, path, body) {
@@ -266,7 +276,9 @@
             li.querySelector('.download-file').addEventListener('click', async (e) => {
               e.preventDefault();
               try {
-                const data = await api('GET', '/artifacts/' + id + '/files/' + encodeURIComponent(name));
+                const path = '/artifacts/' + id + '/files/' + encodeURIComponent(name);
+                const qs = '?key=' + encodeURIComponent(key);
+                const data = await api('GET', path + qs);
                 window.open(data.url, '_blank');
               } catch (err) { alert(err.message); }
             });
@@ -330,17 +342,34 @@
         document.getElementById('configClientId').value = c.clientId || '';
       })();
 
-      // Init Amplify when configured
-      function initAmplify() {
+      // Cognito namespace: v5 = AmazonCognitoIdentity, v3 = AWSCognito.CognitoIdentityServiceProvider
+      var Cognito = typeof AmazonCognitoIdentity !== 'undefined'
+        ? AmazonCognitoIdentity
+        : (typeof AWSCognito !== 'undefined' && AWSCognito.CognitoIdentityServiceProvider)
+          ? AWSCognito.CognitoIdentityServiceProvider
+          : null;
+
+      function initCognito() {
         const c = getConfig();
         if (!c.apiUrl || !c.region || !c.userPoolId || !c.clientId) return false;
-        window.Amplify.Auth.configure({
-          Cognito: {
-            userPoolId: c.userPoolId,
-            userPoolClientId: c.clientId,
-          },
+        if (!Cognito) {
+          console.error('Cognito script not loaded. Check the script URL and network.');
+          return false;
+        }
+        authPool = new Cognito.CognitoUserPool({
+          UserPoolId: c.userPoolId,
+          ClientId: c.clientId,
         });
         return true;
+      }
+
+      function getCurrentUser() {
+        return new Promise((resolve, reject) => {
+          if (!authPool) return reject(new Error('Not configured'));
+          const user = authPool.getCurrentUser();
+          if (!user) return reject(new Error('Not signed in'));
+          user.getSession((err) => (err ? reject(err) : resolve(user)));
+        });
       }
 
       // Show config panel or auth/main
@@ -355,8 +384,15 @@
           return;
         }
         hide(configPanel);
-        if (!initAmplify()) return;
-        window.Amplify.Auth.currentAuthenticatedUser()
+        if (!initCognito()) {
+          show(authPanel);
+          hide(mainPanel);
+          var msg = document.getElementById('loginError');
+          if (msg) { msg.textContent = 'Auth library could not load. Check the browser console and refresh.'; msg.classList.remove('hidden'); }
+          return;
+        }
+        document.getElementById('loginError').classList.add('hidden');
+        getCurrentUser()
           .then(() => { hide(authPanel); show(mainPanel); loadList(); })
           .catch(() => { show(authPanel); hide(mainPanel); });
       }
@@ -365,11 +401,22 @@
       document.getElementById('loginSubmit').addEventListener('submit', async (e) => {
         e.preventDefault();
         showError('loginError', '');
+        const username = document.getElementById('loginUsername').value.trim();
+        const password = document.getElementById('loginPassword').value;
         try {
-          await window.Amplify.Auth.signIn(
-            document.getElementById('loginUsername').value.trim(),
-            document.getElementById('loginPassword').value
-          );
+          const user = new Cognito.CognitoUser({
+            Username: username,
+            Pool: authPool,
+          });
+          await new Promise((resolve, reject) => {
+            user.authenticateUser(new Cognito.AuthenticationDetails({
+              Username: username,
+              Password: password,
+            }), {
+              onSuccess: resolve,
+              onFailure: (err) => reject(new Error(err.message || 'Sign in failed')),
+            });
+          });
           showPanels();
         } catch (err) {
           showError('loginError', err.message || 'Sign in failed');
@@ -381,13 +428,18 @@
         e.preventDefault();
         showError('signUpError', '');
         signUpUsername = document.getElementById('signUpUsername').value.trim();
+        const email = document.getElementById('signUpEmail').value.trim();
+        const password = document.getElementById('signUpPassword').value;
         try {
-          await window.Amplify.Auth.signUp({
-            username: signUpUsername,
-            password: document.getElementById('signUpPassword').value,
-            options: {
-              userAttributes: { email: document.getElementById('signUpEmail').value.trim() },
-            },
+          const attr = new Cognito.CognitoUserAttribute({
+            Name: 'email',
+            Value: email,
+          });
+          await new Promise((resolve, reject) => {
+            authPool.signUp(signUpUsername, password, [attr], null, (err) => {
+              if (err) reject(new Error(err.message || 'Sign up failed'));
+              else resolve();
+            });
           });
           document.getElementById('signUpSubmit').classList.add('hidden');
           show(document.getElementById('confirmBlock'));
@@ -399,8 +451,18 @@
       document.getElementById('confirmSubmit').addEventListener('submit', async (e) => {
         e.preventDefault();
         showError('confirmError', '');
+        const code = document.getElementById('confirmCode').value.trim();
         try {
-          await window.Amplify.Auth.confirmSignUp(signUpUsername, document.getElementById('confirmCode').value.trim());
+          const user = new Cognito.CognitoUser({
+            Username: signUpUsername,
+            Pool: authPool,
+          });
+          await new Promise((resolve, reject) => {
+            user.confirmRegistration(code, true, (err) => {
+              if (err) reject(new Error(err.message || 'Confirmation failed'));
+              else resolve();
+            });
+          });
           hide(document.getElementById('confirmBlock'));
           document.getElementById('signUpSubmit').classList.remove('hidden');
           document.getElementById('signUpForm').classList.add('hidden');
@@ -424,7 +486,10 @@
 
       // Logout
       document.getElementById('btnLogout').addEventListener('click', async () => {
-        await window.Amplify.Auth.signOut();
+        try {
+          const user = authPool.getCurrentUser();
+          if (user) user.signOut();
+        } catch (_) {}
         showPanels();
       });
 
@@ -506,7 +571,7 @@
           const data = await api('POST', '/artifacts/' + currentArtifactId + '/upload-urls', { filenames });
           for (let i = 0; i < data.upload_urls.length; i++) {
             const u = data.upload_urls[i];
-            await fetch(u.url, { method: 'PUT', body: files[i], headers: { 'Content-Type': files[i].type || 'application/octet-stream' } });
+            await fetch(u.url, { method: 'PUT', body: files[i], headers: { 'Content-Type': u.content_type || 'application/octet-stream' } });
           }
           e.target.value = '';
           openDetail(currentArtifactId);
@@ -515,7 +580,12 @@
         }
       });
 
-      showPanels();
+      // Run after page (and Cognito script) have loaded
+      if (document.readyState === 'complete') {
+        showPanels();
+      } else {
+        window.addEventListener('load', showPanels);
+      }
     })();
   </script>
 </body>

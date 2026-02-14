@@ -5,6 +5,7 @@ Uses placeholder owner_id until auth is implemented. Event-driven; wire to HTTP 
 
 import json
 import os
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -251,10 +252,14 @@ def get_upload_urls(event: dict, owner_id: str) -> dict:
         key = f"{prefix}{safe_name}"
         url = s3.generate_presigned_url(
             "put_object",
-            Params={"Bucket": BUCKET_NAME, "Key": key},
+            Params={
+                "Bucket": BUCKET_NAME,
+                "Key": key,
+                "ContentType": "application/octet-stream",
+            },
             ExpiresIn=PRESIGNED_EXPIRY,
         )
-        upload_urls.append({"filename": safe_name, "key": key, "url": url, "expires_in": PRESIGNED_EXPIRY})
+        upload_urls.append({"filename": safe_name, "key": key, "url": url, "expires_in": PRESIGNED_EXPIRY, "content_type": "application/octet-stream"})
         if key not in existing_keys:
             new_keys.append(key)
 
@@ -278,8 +283,17 @@ def get_download_url(event: dict, owner_id: str) -> dict:
     filename = _path_param(event, "filename")
     if not artifact_id or not filename:
         return {"statusCode": 400, "body": json.dumps({"error": "Missing artifact id or filename"})}
+    filename = urllib.parse.unquote(filename)
     safe_name = _safe_filename(filename)
-    key = f"{owner_id}/{artifact_id}/{safe_name}"
+    prefix = f"{owner_id}/{artifact_id}/"
+    built_key = f"{prefix}{safe_name}"
+
+    params = _query_params(event)
+    key_param = (params.get("key") or "").strip()
+    if key_param:
+        key_param = urllib.parse.unquote(key_param)
+        if key_param.startswith(prefix) and key_param not in ("", prefix):
+            built_key = key_param
 
     table = dynamo.Table(TABLE_NAME)
     r = table.get_item(Key={"owner_id": owner_id, "id": artifact_id})
@@ -287,13 +301,38 @@ def get_download_url(event: dict, owner_id: str) -> dict:
     if not item:
         return {"statusCode": 404, "body": json.dumps({"error": "Artifact not found"})}
 
-    file_keys = item.get("file_keys", [])
-    prefix = f"{owner_id}/{artifact_id}/"
+    file_keys = list(item.get("file_keys", []))
+    key = built_key
     if key not in file_keys:
-        try:
-            s3.head_object(Bucket=BUCKET_NAME, Key=key)
-        except Exception:
-            return {"statusCode": 404, "body": json.dumps({"error": "File not found for this artifact"})}
+        for k in file_keys:
+            if not isinstance(k, str):
+                continue
+            if k == built_key or k.endswith("/" + safe_name) or os.path.basename(k) == safe_name:
+                key = k
+                break
+        else:
+            try:
+                s3.head_object(Bucket=BUCKET_NAME, Key=built_key)
+                key = built_key
+            except Exception:
+                return {"statusCode": 404, "body": json.dumps({"error": "File not found for this artifact"})}
+
+    try:
+        s3.head_object(Bucket=BUCKET_NAME, Key=key)
+    except Exception as e:
+        resp = getattr(e, "response", None)
+        err_code = (resp.get("Error", {}).get("Code", "") if isinstance(resp, dict) else "") or ""
+        if err_code in ("404", "NoSuchKey"):
+            new_keys = [k for k in file_keys if k != key]
+            if new_keys != file_keys:
+                now = _now()
+                table.update_item(
+                    Key={"owner_id": owner_id, "id": artifact_id},
+                    UpdateExpression="SET file_keys = :keys, updated_at = :now",
+                    ExpressionAttributeValues={":keys": new_keys, ":now": now},
+                )
+            return {"statusCode": 404, "body": json.dumps({"error": "File not found (may not have been uploaded yet)"})}
+        raise
 
     url = s3.generate_presigned_url(
         "get_object",
@@ -302,7 +341,7 @@ def get_download_url(event: dict, owner_id: str) -> dict:
     )
     return {
         "statusCode": 200,
-        "body": json.dumps({"url": url, "filename": safe_name, "expires_in": PRESIGNED_EXPIRY}),
+        "body": json.dumps({"url": url, "filename": os.path.basename(key), "expires_in": PRESIGNED_EXPIRY}),
     }
 
 
