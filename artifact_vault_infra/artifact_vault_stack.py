@@ -95,6 +95,13 @@ class ArtifactVaultStack(cdk.Stack):
         artifact_id.add_method("PUT", crud_integration)
         artifact_id.add_method("PATCH", crud_integration)
         artifact_id.add_method("DELETE", crud_integration)
+        # File upload: request presigned PUT URLs for one or more files
+        upload_urls = artifact_id.add_resource("upload-urls")
+        upload_urls.add_method("POST", crud_integration)
+        # File download: request presigned GET URL for a file
+        files_resource = artifact_id.add_resource("files")
+        file_filename = files_resource.add_resource("{filename}")
+        file_filename.add_method("GET", crud_integration)
 
         # Stack output: API endpoint URL for testing and front-end
         cdk.CfnOutput(

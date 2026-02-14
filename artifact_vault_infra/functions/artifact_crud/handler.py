@@ -11,6 +11,8 @@ from typing import Any
 
 import boto3
 
+PRESIGNED_EXPIRY = 300  # seconds
+
 OWNER_ID_PLACEHOLDER = "default-user"
 TABLE_NAME = os.environ["ARTIFACTS_TABLE_NAME"]
 BUCKET_NAME = os.environ["ARTIFACTS_BUCKET_NAME"]
@@ -45,6 +47,17 @@ def _query_params(event: dict) -> dict:
 def _path_id(event: dict) -> str | None:
     params = event.get("pathParameters") or {}
     return params.get("id")
+
+
+def _path_param(event: dict, name: str) -> str | None:
+    params = event.get("pathParameters") or {}
+    return params.get(name)
+
+
+def _safe_filename(filename: str) -> str:
+    """Use basename only to avoid path traversal; allow only printable chars."""
+    base = os.path.basename(filename).strip()
+    return "".join(c for c in base if c.isprintable() and c not in ("/", "\\")) or "file"
 
 
 def _now() -> str:
@@ -204,16 +217,105 @@ def delete_artifact(event: dict, owner_id: str) -> dict:
     return {"statusCode": 204, "body": ""}
 
 
+def get_upload_urls(event: dict, owner_id: str) -> dict:
+    """Return presigned PUT URLs for one or more files; store keys in DynamoDB."""
+    artifact_id = _path_id(event)
+    if not artifact_id:
+        return {"statusCode": 400, "body": json.dumps({"error": "Missing artifact id"})}
+    body = _body(event)
+    filenames = body.get("filenames")
+    if not filenames:
+        return {"statusCode": 400, "body": json.dumps({"error": "Missing filenames (array of strings)"})}
+    if not isinstance(filenames, list):
+        filenames = [str(filenames).strip()] if str(filenames).strip() else []
+    filenames = [f for f in filenames if isinstance(f, str) and f.strip()]
+
+    table = dynamo.Table(TABLE_NAME)
+    r = table.get_item(Key={"owner_id": owner_id, "id": artifact_id})
+    item = r.get("Item")
+    if not item:
+        return {"statusCode": 404, "body": json.dumps({"error": "Artifact not found"})}
+
+    prefix = f"{owner_id}/{artifact_id}/"
+    existing_keys = set(item.get("file_keys", []))
+    upload_urls = []
+    new_keys = list(existing_keys)
+
+    for raw_name in filenames:
+        safe_name = _safe_filename(raw_name)
+        key = f"{prefix}{safe_name}"
+        url = s3.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": BUCKET_NAME, "Key": key},
+            ExpiresIn=PRESIGNED_EXPIRY,
+        )
+        upload_urls.append({"filename": safe_name, "key": key, "url": url, "expires_in": PRESIGNED_EXPIRY})
+        if key not in existing_keys:
+            new_keys.append(key)
+
+    if new_keys != list(existing_keys):
+        now = _now()
+        table.update_item(
+            Key={"owner_id": owner_id, "id": artifact_id},
+            UpdateExpression="SET file_keys = :keys, updated_at = :now",
+            ExpressionAttributeValues={":keys": new_keys, ":now": now},
+        )
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps({"upload_urls": upload_urls}),
+    }
+
+
+def get_download_url(event: dict, owner_id: str) -> dict:
+    """Return a presigned GET URL for one file of the artifact."""
+    artifact_id = _path_id(event)
+    filename = _path_param(event, "filename")
+    if not artifact_id or not filename:
+        return {"statusCode": 400, "body": json.dumps({"error": "Missing artifact id or filename"})}
+    safe_name = _safe_filename(filename)
+    key = f"{owner_id}/{artifact_id}/{safe_name}"
+
+    table = dynamo.Table(TABLE_NAME)
+    r = table.get_item(Key={"owner_id": owner_id, "id": artifact_id})
+    item = r.get("Item")
+    if not item:
+        return {"statusCode": 404, "body": json.dumps({"error": "Artifact not found"})}
+
+    file_keys = item.get("file_keys", [])
+    prefix = f"{owner_id}/{artifact_id}/"
+    if key not in file_keys:
+        try:
+            s3.head_object(Bucket=BUCKET_NAME, Key=key)
+        except Exception:
+            return {"statusCode": 404, "body": json.dumps({"error": "File not found for this artifact"})}
+
+    url = s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": BUCKET_NAME, "Key": key},
+        ExpiresIn=PRESIGNED_EXPIRY,
+    )
+    return {
+        "statusCode": 200,
+        "body": json.dumps({"url": url, "filename": safe_name, "expires_in": PRESIGNED_EXPIRY}),
+    }
+
+
 def handler(event: dict, context: Any) -> dict:
-    """Route by action (create, list, get, update, delete). API Gateway can pass action in body or derive from path/method."""
+    """Route by action (create, list, get, update, delete, get_upload_urls, get_download_url)."""
     action = event.get("action")
-    if not action and event.get("httpMethod") and event.get("pathParameters"):
+    if not action and event.get("httpMethod"):
         path = event.get("path", "") or event.get("resource", "")
-        pid = _path_id(event)
+        params = event.get("pathParameters") or {}
+        pid = params.get("id")
         method = (event.get("httpMethod") or "").upper()
-        if method == "POST" and "/artifacts" in path and not pid:
+        if "upload-urls" in path and method == "POST" and pid:
+            action = "get_upload_urls"
+        elif params.get("filename") and method == "GET" and pid:
+            action = "get_download_url"
+        elif method == "POST" and "/artifacts" in path and not pid:
             action = "create"
-        elif method == "GET" and pid:
+        elif method == "GET" and pid and not params.get("filename"):
             action = "get"
         elif method == "GET":
             action = "list"
@@ -231,6 +333,8 @@ def handler(event: dict, context: Any) -> dict:
         "get": get_artifact,
         "update": update_artifact,
         "delete": delete_artifact,
+        "get_upload_urls": get_upload_urls,
+        "get_download_url": get_download_url,
     }
     fn = actions.get((action or "").lower())
     if not fn:
