@@ -1,7 +1,10 @@
 """Artifact Vault stack – API Gateway, Lambda, DynamoDB, S3."""
 
+import os
+
 import aws_cdk as cdk
 from aws_cdk import aws_dynamodb as dynamodb
+from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_s3 as s3
 from constructs import Construct
 
@@ -51,3 +54,19 @@ class ArtifactVaultStack(cdk.Stack):
             versioned=True,
             removal_policy=cdk.RemovalPolicy.RETAIN,
         )
+
+        # Lambda: artifact CRUD (create, list, get, update, delete); placeholder owner until auth
+        handler_dir = os.path.join(os.path.dirname(__file__), "functions", "artifact_crud")
+        self.artifact_crud_function = lambda_.Function(
+            self,
+            "ArtifactCrudFunction",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="handler.handler",
+            code=lambda_.Code.from_asset(handler_dir),
+            environment={
+                "ARTIFACTS_TABLE_NAME": self.artifacts_table.table_name,
+                "ARTIFACTS_BUCKET_NAME": self.artifacts_bucket.bucket_name,
+            },
+        )
+        self.artifacts_table.grant_read_write_data(self.artifact_crud_function)
+        self.artifacts_bucket.grant_read_write(self.artifact_crud_function)
