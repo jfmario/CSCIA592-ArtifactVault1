@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Artifact Vault</title>
+  <script src="https://cdn.jsdelivr.net/npm/aws-amplify@5/dist/aws-amplify.min.js"></script>
+  <style>
+    :root { --bg: #0f1419; --surface: #1a2332; --border: #2d3a4f; --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --danger: #f85149; --success: #3fb950; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); margin: 0; min-height: 100vh; }
+    .container { max-width: 720px; margin: 0 auto; padding: 1.5rem; }
+    h1 { font-size: 1.5rem; margin: 0 0 1rem; }
+    h2 { font-size: 1.15rem; margin: 1rem 0 0.5rem; }
+    form { display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1rem; }
+    label { font-size: 0.875rem; color: var(--muted); }
+    input, textarea, button, select { padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 0.9375rem; }
+    textarea { min-height: 80px; resize: vertical; }
+    button { cursor: pointer; font-weight: 500; background: var(--accent); color: var(--bg); border: none; }
+    button:hover { opacity: 0.9; }
+    button.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+    button.danger { background: var(--danger); color: #fff; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; }
+    .row .actions { display: flex; gap: 0.5rem; }
+    .error { color: var(--danger); font-size: 0.875rem; margin-top: 0.5rem; }
+    .success { color: var(--success); font-size: 0.875rem; margin-top: 0.5rem; }
+    .hidden { display: none !important; }
+    .config { font-size: 0.8125rem; color: var(--muted); margin-bottom: 1rem; }
+    .config input { width: 100%; margin-top: 0.25rem; }
+    .file-list { list-style: none; padding: 0; margin: 0.5rem 0 0; }
+    .file-list li { display: flex; align-items: center; justify-content: space-between; padding: 0.35rem 0; border-bottom: 1px solid var(--border); }
+    .file-list li:last-child { border-bottom: none; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .nav { margin-bottom: 1rem; }
+    .nav a, .nav button { margin-right: 0.75rem; }
+  </style>
+</head>
+<body>
+  <div class="container" id="app">
+    <h1>Artifact Vault</h1>
+
+    <!-- Config (show when not configured) -->
+    <div id="configPanel" class="card">
+      <h2>Configuration</h2>
+      <p class="config">Set these once (from CDK stack outputs). Stored in localStorage.</p>
+      <form id="configForm">
+        <label>API base URL (e.g. https://xxx.execute-api.us-east-1.amazonaws.com/prod/)</label>
+        <input type="url" id="configApiUrl" placeholder="https://...amazonaws.com/prod/" required>
+        <label>AWS Region (e.g. us-east-1)</label>
+        <input type="text" id="configRegion" placeholder="us-east-1" required>
+        <label>User Pool ID</label>
+        <input type="text" id="configUserPoolId" placeholder="us-east-1_xxxxx" required>
+        <label>User Pool Client ID</label>
+        <input type="text" id="configClientId" placeholder="xxxxxxxxxx" required>
+        <button type="submit">Save and reload</button>
+      </form>
+    </div>
+
+    <!-- Auth -->
+    <div id="authPanel" class="hidden">
+      <div id="loginForm" class="card">
+        <h2>Sign in</h2>
+        <form id="loginSubmit">
+          <input type="text" id="loginUsername" placeholder="Username or email" required autocomplete="username">
+          <input type="password" id="loginPassword" placeholder="Password" required autocomplete="current-password">
+          <div id="loginError" class="error hidden"></div>
+          <button type="submit">Sign in</button>
+        </form>
+        <p>No account? <a href="#" id="showSignUp">Sign up</a></p>
+      </div>
+      <div id="signUpForm" class="card hidden">
+        <h2>Sign up</h2>
+        <form id="signUpSubmit">
+          <input type="text" id="signUpUsername" placeholder="Username" required autocomplete="username">
+          <input type="email" id="signUpEmail" placeholder="Email" required autocomplete="email">
+          <input type="password" id="signUpPassword" placeholder="Password (min 8, upper, lower, digit)" required autocomplete="new-password">
+          <div id="signUpError" class="error hidden"></div>
+          <button type="submit">Create account</button>
+        </form>
+        <div id="confirmBlock" class="hidden">
+          <p class="success">Check your email for a verification code.</p>
+          <form id="confirmSubmit">
+            <input type="text" id="confirmCode" placeholder="Verification code" required>
+            <div id="confirmError" class="error hidden"></div>
+            <button type="submit">Confirm</button>
+          </form>
+        </div>
+        <p>Already have an account? <a href="#" id="showLogin">Sign in</a></p>
+      </div>
+    </div>
+
+    <!-- Main app (after login) -->
+    <div id="mainPanel" class="hidden">
+      <div class="nav row">
+        <span><strong>Artifacts</strong></span>
+        <div>
+          <button type="button" id="btnNewArtifact" class="secondary">New artifact</button>
+          <button type="button" id="btnLogout" class="secondary">Sign out</button>
+        </div>
+      </div>
+
+      <div id="listView">
+        <div id="artifactList"></div>
+      </div>
+
+      <div id="createView" class="hidden card">
+        <h2>New artifact</h2>
+        <form id="createForm">
+          <input type="text" id="createTitle" placeholder="Title" required>
+          <textarea id="createDescription" placeholder="Description"></textarea>
+          <input type="text" id="createTags" placeholder="Tags (comma-separated)">
+          <select id="createStatus"><option value="draft">Draft</option><option value="published">Published</option></select>
+          <div id="createError" class="error hidden"></div>
+          <div class="row">
+            <button type="submit">Create</button>
+            <button type="button" id="createCancel" class="secondary">Cancel</button>
+          </div>
+        </form>
+      </div>
+
+      <div id="detailView" class="hidden card">
+        <div class="row">
+          <h2 id="detailTitle">—</h2>
+          <div class="actions">
+            <button type="button" id="btnEditArtifact" class="secondary">Edit</button>
+            <button type="button" id="btnDeleteArtifact" class="danger">Delete</button>
+          </div>
+        </div>
+        <p id="detailDescription" style="color: var(--muted); margin: 0.5rem 0;"></p>
+        <p id="detailMeta" style="font-size: 0.8125rem; color: var(--muted);"></p>
+        <h3 style="font-size: 1rem; margin-top: 1rem;">Files</h3>
+        <input type="file" id="fileUploadInput" multiple class="hidden">
+        <button type="button" id="btnUploadFile" class="secondary">Upload file(s)</button>
+        <ul class="file-list" id="detailFileList"></ul>
+        <p><a href="#" id="detailBack">← Back to list</a></p>
+      </div>
+
+      <div id="editView" class="hidden card">
+        <h2>Edit artifact</h2>
+        <form id="editForm">
+          <input type="hidden" id="editId">
+          <input type="text" id="editTitle" placeholder="Title" required>
+          <textarea id="editDescription" placeholder="Description"></textarea>
+          <input type="text" id="editTags" placeholder="Tags (comma-separated)">
+          <select id="editStatus"><option value="draft">Draft</option><option value="published">Published</option></select>
+          <div id="editError" class="error hidden"></div>
+          <div class="row">
+            <button type="submit">Save</button>
+            <button type="button" id="editCancel" class="secondary">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const CONFIG_KEYS = ['apiUrl', 'region', 'userPoolId', 'clientId'];
+      function getConfig() {
+        const c = {};
+        CONFIG_KEYS.forEach(k => { c[k] = (localStorage.getItem('av_' + k) || '').trim(); });
+        return c;
+      }
+      function setConfig(apiUrl, region, userPoolId, clientId) {
+        localStorage.setItem('av_apiUrl', apiUrl);
+        localStorage.setItem('av_region', region);
+        localStorage.setItem('av_userPoolId', userPoolId);
+        localStorage.setItem('av_clientId', clientId);
+      }
+      function isConfigured() {
+        const c = getConfig();
+        return c.apiUrl && c.region && c.userPoolId && c.clientId;
+      }
+
+      let currentArtifactId = null;
+
+      function show(el) { el.classList.remove('hidden'); }
+      function hide(el) { el.classList.add('hidden'); }
+      function showError(panelId, msg) {
+        const p = document.getElementById(panelId);
+        if (!p) return;
+        p.textContent = msg || '';
+        p.classList.toggle('hidden', !msg);
+      }
+
+      async function getToken() {
+        const session = await window.Amplify.Auth.currentSession();
+        return session.getIdToken().getJwtToken();
+      }
+
+      async function api(method, path, body) {
+        const cfg = getConfig();
+        const url = cfg.apiUrl.replace(/\/$/, '') + path;
+        const opts = { method, headers: { 'Content-Type': 'application/json' } };
+        try {
+          const token = await getToken();
+          opts.headers['Authorization'] = 'Bearer ' + token;
+        } catch (_) {}
+        if (body !== undefined) opts.body = typeof body === 'string' ? body : JSON.stringify(body);
+        const res = await fetch(url, opts);
+        const text = await res.text();
+        if (!res.ok) throw new Error(text || res.statusText);
+        return text ? JSON.parse(text) : null;
+      }
+
+      function renderList(artifacts) {
+        const list = document.getElementById('artifactList');
+        list.innerHTML = '';
+        if (!artifacts || artifacts.length === 0) {
+          list.innerHTML = '<p class="config">No artifacts yet. Create one to get started.</p>';
+          return;
+        }
+        artifacts.forEach(a => {
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.innerHTML = `
+            <div class="row">
+              <strong>${escapeHtml(a.title || 'Untitled')}</strong>
+              <div class="actions">
+                <button type="button" class="secondary view-btn" data-id="${escapeHtml(a.id)}">View</button>
+                <button type="button" class="secondary edit-btn" data-id="${escapeHtml(a.id)}">Edit</button>
+                <button type="button" class="danger delete-btn" data-id="${escapeHtml(a.id)}">Delete</button>
+              </div>
+            </div>
+          `;
+          list.appendChild(card);
+        });
+        list.querySelectorAll('.view-btn').forEach(btn => btn.addEventListener('click', () => openDetail(btn.dataset.id)));
+        list.querySelectorAll('.edit-btn').forEach(btn => btn.addEventListener('click', () => openEdit(btn.dataset.id)));
+        list.querySelectorAll('.delete-btn').forEach(btn => btn.addEventListener('click', () => deleteArtifact(btn.dataset.id)));
+      }
+
+      function escapeHtml(s) {
+        if (s == null) return '';
+        const div = document.createElement('div');
+        div.textContent = s;
+        return div.innerHTML;
+      }
+
+      async function loadList() {
+        try {
+          const data = await api('GET', '/artifacts');
+          renderList(data.artifacts || []);
+        } catch (e) {
+          renderList([]);
+          console.error(e);
+        }
+      }
+
+      async function openDetail(id) {
+        currentArtifactId = id;
+        try {
+          const a = await api('GET', '/artifacts/' + id);
+          document.getElementById('detailTitle').textContent = a.title || 'Untitled';
+          document.getElementById('detailDescription').textContent = a.description || '—';
+          document.getElementById('detailMeta').textContent =
+            `Status: ${a.status || '—'} | Tags: ${(a.tags || []).join(', ') || '—'} | Updated: ${a.updated_at || '—'}`;
+          const fileList = document.getElementById('detailFileList');
+          fileList.innerHTML = '';
+          (a.file_keys || []).forEach(key => {
+            const name = key.split('/').pop();
+            const li = document.createElement('li');
+            li.innerHTML = `<span>${escapeHtml(name)}</span><a href="#" class="download-file" data-key="${escapeHtml(key)}">Download</a>`;
+            li.querySelector('.download-file').addEventListener('click', async (e) => {
+              e.preventDefault();
+              try {
+                const data = await api('GET', '/artifacts/' + id + '/files/' + encodeURIComponent(name));
+                window.open(data.url, '_blank');
+              } catch (err) { alert(err.message); }
+            });
+            fileList.appendChild(li);
+          });
+          hide(document.getElementById('listView'));
+          hide(document.getElementById('createView'));
+          hide(document.getElementById('editView'));
+          show(document.getElementById('detailView'));
+        } catch (e) {
+          alert(e.message);
+        }
+      }
+
+      function openEdit(id) {
+        currentArtifactId = id;
+        api('GET', '/artifacts/' + id).then(a => {
+          document.getElementById('editId').value = a.id;
+          document.getElementById('editTitle').value = a.title || '';
+          document.getElementById('editDescription').value = a.description || '';
+          document.getElementById('editTags').value = (a.tags || []).join(', ');
+          document.getElementById('editStatus').value = a.status || 'draft';
+          hide(document.getElementById('listView'));
+          hide(document.getElementById('detailView'));
+          hide(document.getElementById('createView'));
+          show(document.getElementById('editView'));
+        }).catch(e => alert(e.message));
+      }
+
+      async function deleteArtifact(id) {
+        if (!confirm('Delete this artifact and its files?')) return;
+        try {
+          await api('DELETE', '/artifacts/' + id);
+          currentArtifactId = null;
+          show(document.getElementById('listView'));
+          hide(document.getElementById('detailView'));
+          hide(document.getElementById('createView'));
+          hide(document.getElementById('editView'));
+          loadList();
+        } catch (e) { alert(e.message); }
+      }
+
+      // Config form
+      document.getElementById('configForm').addEventListener('submit', (e) => {
+        e.preventDefault();
+        setConfig(
+          document.getElementById('configApiUrl').value.trim(),
+          document.getElementById('configRegion').value.trim(),
+          document.getElementById('configUserPoolId').value.trim(),
+          document.getElementById('configClientId').value.trim()
+        );
+        window.location.reload();
+      });
+
+      // Prefill config from localStorage
+      (function () {
+        const c = getConfig();
+        document.getElementById('configApiUrl').value = c.apiUrl || '';
+        document.getElementById('configRegion').value = c.region || '';
+        document.getElementById('configUserPoolId').value = c.userPoolId || '';
+        document.getElementById('configClientId').value = c.clientId || '';
+      })();
+
+      // Init Amplify when configured
+      function initAmplify() {
+        const c = getConfig();
+        if (!c.apiUrl || !c.region || !c.userPoolId || !c.clientId) return false;
+        window.Amplify.Auth.configure({
+          Cognito: {
+            userPoolId: c.userPoolId,
+            userPoolClientId: c.clientId,
+          },
+        });
+        return true;
+      }
+
+      // Show config panel or auth/main
+      function showPanels() {
+        const configPanel = document.getElementById('configPanel');
+        const authPanel = document.getElementById('authPanel');
+        const mainPanel = document.getElementById('mainPanel');
+        if (!isConfigured()) {
+          show(configPanel);
+          hide(authPanel);
+          hide(mainPanel);
+          return;
+        }
+        hide(configPanel);
+        if (!initAmplify()) return;
+        window.Amplify.Auth.currentAuthenticatedUser()
+          .then(() => { hide(authPanel); show(mainPanel); loadList(); })
+          .catch(() => { show(authPanel); hide(mainPanel); });
+      }
+
+      // Login
+      document.getElementById('loginSubmit').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        showError('loginError', '');
+        try {
+          await window.Amplify.Auth.signIn(
+            document.getElementById('loginUsername').value.trim(),
+            document.getElementById('loginPassword').value
+          );
+          showPanels();
+        } catch (err) {
+          showError('loginError', err.message || 'Sign in failed');
+        }
+      });
+
+      let signUpUsername = '';
+      document.getElementById('signUpSubmit').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        showError('signUpError', '');
+        signUpUsername = document.getElementById('signUpUsername').value.trim();
+        try {
+          await window.Amplify.Auth.signUp({
+            username: signUpUsername,
+            password: document.getElementById('signUpPassword').value,
+            options: {
+              userAttributes: { email: document.getElementById('signUpEmail').value.trim() },
+            },
+          });
+          document.getElementById('signUpSubmit').classList.add('hidden');
+          show(document.getElementById('confirmBlock'));
+          showError('confirmError', '');
+        } catch (err) {
+          showError('signUpError', err.message || 'Sign up failed');
+        }
+      });
+      document.getElementById('confirmSubmit').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        showError('confirmError', '');
+        try {
+          await window.Amplify.Auth.confirmSignUp(signUpUsername, document.getElementById('confirmCode').value.trim());
+          hide(document.getElementById('confirmBlock'));
+          document.getElementById('signUpSubmit').classList.remove('hidden');
+          document.getElementById('signUpForm').classList.add('hidden');
+          document.getElementById('loginForm').classList.remove('hidden');
+          showError('loginError', 'Account verified. Sign in above.');
+        } catch (err) {
+          showError('confirmError', err.message || 'Confirmation failed');
+        }
+      });
+
+      document.getElementById('showSignUp').addEventListener('click', (e) => {
+        e.preventDefault();
+        document.getElementById('loginForm').classList.add('hidden');
+        document.getElementById('signUpForm').classList.remove('hidden');
+      });
+      document.getElementById('showLogin').addEventListener('click', (e) => {
+        e.preventDefault();
+        document.getElementById('signUpForm').classList.add('hidden');
+        document.getElementById('loginForm').classList.remove('hidden');
+      });
+
+      // Logout
+      document.getElementById('btnLogout').addEventListener('click', async () => {
+        await window.Amplify.Auth.signOut();
+        showPanels();
+      });
+
+      // New artifact
+      document.getElementById('btnNewArtifact').addEventListener('click', () => {
+        hide(document.getElementById('listView'));
+        hide(document.getElementById('detailView'));
+        hide(document.getElementById('editView'));
+        show(document.getElementById('createView'));
+        document.getElementById('createForm').reset();
+        showError('createError', '');
+      });
+      document.getElementById('createCancel').addEventListener('click', () => {
+        show(document.getElementById('listView'));
+        hide(document.getElementById('createView'));
+        loadList();
+      });
+      document.getElementById('createForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        showError('createError', '');
+        const tags = document.getElementById('createTags').value.split(',').map(t => t.trim()).filter(Boolean);
+        try {
+          const a = await api('POST', '/artifacts', {
+            title: document.getElementById('createTitle').value.trim(),
+            description: document.getElementById('createDescription').value.trim(),
+            tags,
+            status: document.getElementById('createStatus').value,
+          });
+          show(document.getElementById('listView'));
+          hide(document.getElementById('createView'));
+          loadList();
+          openDetail(a.id);
+        } catch (err) {
+          showError('createError', err.message || 'Create failed');
+        }
+      });
+
+      // Edit
+      document.getElementById('editCancel').addEventListener('click', () => {
+        show(document.getElementById('listView'));
+        hide(document.getElementById('editView'));
+        loadList();
+      });
+      document.getElementById('editForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        showError('editError', '');
+        const id = document.getElementById('editId').value;
+        const tags = document.getElementById('editTags').value.split(',').map(t => t.trim()).filter(Boolean);
+        try {
+          await api('PUT', '/artifacts/' + id, {
+            title: document.getElementById('editTitle').value.trim(),
+            description: document.getElementById('editDescription').value.trim(),
+            tags,
+            status: document.getElementById('editStatus').value,
+          });
+          show(document.getElementById('listView'));
+          hide(document.getElementById('editView'));
+          loadList();
+        } catch (err) {
+          showError('editError', err.message || 'Save failed');
+        }
+      });
+
+      // Detail back
+      document.getElementById('detailBack').addEventListener('click', (e) => {
+        e.preventDefault();
+        show(document.getElementById('listView'));
+        hide(document.getElementById('detailView'));
+        loadList();
+      });
+
+      // Upload files
+      document.getElementById('btnUploadFile').addEventListener('click', () => document.getElementById('fileUploadInput').click());
+      document.getElementById('fileUploadInput').addEventListener('change', async (e) => {
+        const files = e.target.files;
+        if (!files || !files.length || !currentArtifactId) return;
+        const filenames = Array.from(files).map(f => f.name);
+        try {
+          const data = await api('POST', '/artifacts/' + currentArtifactId + '/upload-urls', { filenames });
+          for (let i = 0; i < data.upload_urls.length; i++) {
+            const u = data.upload_urls[i];
+            await fetch(u.url, { method: 'PUT', body: files[i], headers: { 'Content-Type': files[i].type || 'application/octet-stream' } });
+          }
+          e.target.value = '';
+          openDetail(currentArtifactId);
+        } catch (err) {
+          alert(err.message || 'Upload failed');
+        }
+      });
+
+      showPanels();
+    })();
+  </script>
+</body>
+</html>

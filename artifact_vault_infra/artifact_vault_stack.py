@@ -4,6 +4,7 @@ import os
 
 import aws_cdk as cdk
 from aws_cdk import aws_apigateway as apigw
+from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_s3 as s3
@@ -72,7 +73,48 @@ class ArtifactVaultStack(cdk.Stack):
         self.artifacts_table.grant_read_write_data(self.artifact_crud_function)
         self.artifacts_bucket.grant_read_write(self.artifact_crud_function)
 
-        # API Gateway: REST API with Lambda proxy; file upload/download routes added later
+        # Cognito User Pool for authentication
+        self.user_pool = cognito.UserPool(
+            self,
+            "UserPool",
+            user_pool_name="artifact-vault-users",
+            self_sign_up_enabled=True,
+            sign_in_aliases=cognito.SignInAliases(username=True, email=True),
+            auto_verify=cognito.AutoVerifiedAttrs(email=True),
+            password_policy=cognito.PasswordPolicy(
+                min_length=8,
+                require_lowercase=True,
+                require_uppercase=True,
+                require_digits=True,
+                require_symbols=False,
+            ),
+            removal_policy=cdk.RemovalPolicy.RETAIN,
+        )
+        self.user_pool_client = self.user_pool.add_client(
+            "WebClient",
+            user_pool_client_name="artifact-vault-web",
+            auth_flows=cognito.AuthFlow(
+                user_password=True,
+                user_srp=True,
+            ),
+            generate_secret=False,
+        )
+
+        # Cognito Identity Pool (federated with User Pool) for future use (e.g. direct AWS credential access)
+        self.identity_pool = cognito.CfnIdentityPool(
+            self,
+            "IdentityPool",
+            identity_pool_name="artifact_vault_identity_pool",
+            allow_unauthenticated_identities=False,
+            cognito_identity_providers=[
+                cognito.CfnIdentityPool.CognitoIdentityProviderProperty(
+                    client_id=self.user_pool_client.user_pool_client_id,
+                    provider_name=self.user_pool.user_pool_provider_name,
+                ),
+            ],
+        )
+
+        # API Gateway: REST API with Cognito authorizer
         api = apigw.RestApi(
             self,
             "ArtifactVaultApi",
@@ -83,31 +125,66 @@ class ArtifactVaultStack(cdk.Stack):
                 allow_headers=["Content-Type", "Authorization"],
             ),
         )
+        cognito_authorizer = apigw.CognitoUserPoolsAuthorizer(
+            self,
+            "CognitoAuthorizer",
+            cognito_user_pools=[self.user_pool],
+            authorizer_name="artifact-vault-cognito",
+            identity_source="method.request.header.Authorization",
+        )
+        method_options = apigw.MethodOptions(authorizer=cognito_authorizer)
+
         crud_integration = apigw.LambdaIntegration(
             self.artifact_crud_function,
             proxy=True,
         )
         artifacts = api.root.add_resource("artifacts")
-        artifacts.add_method("GET", crud_integration)
-        artifacts.add_method("POST", crud_integration)
+        artifacts.add_method("GET", crud_integration, method_options)
+        artifacts.add_method("POST", crud_integration, method_options)
         artifact_id = artifacts.add_resource("{id}")
-        artifact_id.add_method("GET", crud_integration)
-        artifact_id.add_method("PUT", crud_integration)
-        artifact_id.add_method("PATCH", crud_integration)
-        artifact_id.add_method("DELETE", crud_integration)
-        # File upload: request presigned PUT URLs for one or more files
+        artifact_id.add_method("GET", crud_integration, method_options)
+        artifact_id.add_method("PUT", crud_integration, method_options)
+        artifact_id.add_method("PATCH", crud_integration, method_options)
+        artifact_id.add_method("DELETE", crud_integration, method_options)
         upload_urls = artifact_id.add_resource("upload-urls")
-        upload_urls.add_method("POST", crud_integration)
-        # File download: request presigned GET URL for a file
+        upload_urls.add_method("POST", crud_integration, method_options)
         files_resource = artifact_id.add_resource("files")
         file_filename = files_resource.add_resource("{filename}")
-        file_filename.add_method("GET", crud_integration)
+        file_filename.add_method("GET", crud_integration, method_options)
 
-        # Stack output: API endpoint URL for testing and front-end
+        # Stack outputs for front-end config
         cdk.CfnOutput(
             self,
             "ApiEndpointUrl",
             value=api.url,
-            description="Artifact Vault API base URL (e.g. for testing and front-end)",
+            description="Artifact Vault API base URL",
             export_name="ArtifactVaultApiEndpointUrl",
+        )
+        cdk.CfnOutput(
+            self,
+            "UserPoolId",
+            value=self.user_pool.user_pool_id,
+            description="Cognito User Pool ID for front-end auth",
+            export_name="ArtifactVaultUserPoolId",
+        )
+        cdk.CfnOutput(
+            self,
+            "UserPoolClientId",
+            value=self.user_pool_client.user_pool_client_id,
+            description="Cognito User Pool Client ID for front-end auth",
+            export_name="ArtifactVaultUserPoolClientId",
+        )
+        cdk.CfnOutput(
+            self,
+            "IdentityPoolId",
+            value=self.identity_pool.ref,
+            description="Cognito Identity Pool ID (optional, for direct AWS credentials)",
+            export_name="ArtifactVaultIdentityPoolId",
+        )
+        cdk.CfnOutput(
+            self,
+            "Region",
+            value=self.region,
+            description="AWS Region (for front-end Cognito config)",
+            export_name="ArtifactVaultRegion",
         )

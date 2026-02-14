@@ -27,10 +27,15 @@ CORS_HEADERS = {
 
 
 def _owner_id(event: dict) -> str:
-    """Resolve owner id (placeholder until auth)."""
+    """Resolve owner id from Cognito authorizer (sub) or placeholder."""
     ctx = event.get("requestContext") or {}
     auth = ctx.get("authorizer") or {}
-    return auth.get("ownerId") or OWNER_ID_PLACEHOLDER
+    return (
+        auth.get("ownerId")
+        or auth.get("sub")
+        or (auth.get("claims") or {}).get("sub")
+        or OWNER_ID_PLACEHOLDER
+    )
 
 
 def _body(event: dict) -> dict:
