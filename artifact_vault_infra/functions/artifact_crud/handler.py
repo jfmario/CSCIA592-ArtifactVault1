@@ -17,6 +17,12 @@ BUCKET_NAME = os.environ["ARTIFACTS_BUCKET_NAME"]
 dynamo = boto3.resource("dynamodb")
 s3 = boto3.client("s3")
 
+# CORS headers for API Gateway (browser / front-end)
+CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Credentials": "true",
+}
+
 
 def _owner_id(event: dict) -> str:
     """Resolve owner id (placeholder until auth)."""
@@ -228,5 +234,11 @@ def handler(event: dict, context: Any) -> dict:
     }
     fn = actions.get((action or "").lower())
     if not fn:
-        return {"statusCode": 400, "body": json.dumps({"error": f"Unknown action: {action}"})}
-    return fn(event, owner_id)
+        return {
+            "statusCode": 400,
+            "headers": CORS_HEADERS,
+            "body": json.dumps({"error": f"Unknown action: {action}"}),
+        }
+    result = fn(event, owner_id)
+    result.setdefault("headers", {}).update(CORS_HEADERS)
+    return result

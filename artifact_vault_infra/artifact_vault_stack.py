@@ -3,6 +3,7 @@
 import os
 
 import aws_cdk as cdk
+from aws_cdk import aws_apigateway as apigw
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_s3 as s3
@@ -70,3 +71,36 @@ class ArtifactVaultStack(cdk.Stack):
         )
         self.artifacts_table.grant_read_write_data(self.artifact_crud_function)
         self.artifacts_bucket.grant_read_write(self.artifact_crud_function)
+
+        # API Gateway: REST API with Lambda proxy; file upload/download routes added later
+        api = apigw.RestApi(
+            self,
+            "ArtifactVaultApi",
+            rest_api_name="artifact-vault-api",
+            default_cors_preflight_options=apigw.CorsOptions(
+                allow_origins=apigw.Cors.ALL_ORIGINS,
+                allow_methods=apigw.Cors.ALL_METHODS,
+                allow_headers=["Content-Type", "Authorization"],
+            ),
+        )
+        crud_integration = apigw.LambdaIntegration(
+            self.artifact_crud_function,
+            proxy=True,
+        )
+        artifacts = api.root.add_resource("artifacts")
+        artifacts.add_method("GET", crud_integration)
+        artifacts.add_method("POST", crud_integration)
+        artifact_id = artifacts.add_resource("{id}")
+        artifact_id.add_method("GET", crud_integration)
+        artifact_id.add_method("PUT", crud_integration)
+        artifact_id.add_method("PATCH", crud_integration)
+        artifact_id.add_method("DELETE", crud_integration)
+
+        # Stack output: API endpoint URL for testing and front-end
+        cdk.CfnOutput(
+            self,
+            "ApiEndpointUrl",
+            value=api.url,
+            description="Artifact Vault API base URL (e.g. for testing and front-end)",
+            export_name="ArtifactVaultApiEndpointUrl",
+        )
