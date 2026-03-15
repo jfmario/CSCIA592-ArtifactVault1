@@ -1,6 +1,6 @@
 """
 Artifact CRUD Lambda – create, list, get, update, delete artifacts.
-Uses placeholder owner_id until auth is implemented. Event-driven; wire to HTTP (e.g. API Gateway) later.
+Requires Cognito authorizer; returns 401 when owner (sub) is absent (fail closed).
 """
 
 import json
@@ -14,7 +14,6 @@ import boto3
 
 PRESIGNED_EXPIRY = 300  # seconds
 
-OWNER_ID_PLACEHOLDER = "default-user"
 TABLE_NAME = os.environ["ARTIFACTS_TABLE_NAME"]
 BUCKET_NAME = os.environ["ARTIFACTS_BUCKET_NAME"]
 dynamo = boto3.resource("dynamodb")
@@ -27,16 +26,15 @@ CORS_HEADERS = {
 }
 
 
-def _owner_id(event: dict) -> str:
-    """Resolve owner id from Cognito authorizer (sub) or placeholder."""
+def _owner_id(event: dict) -> str | None:
+    """Resolve owner id from Cognito authorizer (sub). Returns None if absent (caller should return 401)."""
     ctx = event.get("requestContext") or {}
     auth = ctx.get("authorizer") or {}
     return (
         auth.get("ownerId")
         or auth.get("sub")
         or (auth.get("claims") or {}).get("sub")
-        or OWNER_ID_PLACEHOLDER
-    )
+    ) or None
 
 
 def _body(event: dict) -> dict:
@@ -386,6 +384,13 @@ def handler(event: dict, context: Any) -> dict:
             "statusCode": 400,
             "headers": CORS_HEADERS,
             "body": json.dumps({"error": f"Unknown action: {action}"}),
+        }
+    # Fail closed: require authenticated owner (assessment: do not fall back to placeholder)
+    if owner_id is None:
+        return {
+            "statusCode": 401,
+            "headers": CORS_HEADERS,
+            "body": json.dumps({"error": "Unauthorized", "message": "Missing or invalid authorization context"}),
         }
     result = fn(event, owner_id)
     result.setdefault("headers", {}).update(CORS_HEADERS)
